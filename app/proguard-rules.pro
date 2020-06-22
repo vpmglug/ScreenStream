@@ -26,6 +26,7 @@
 -keepnames class info.dvkr.screenstream.** { *; }
 
 #Crashlytics
+-keepattributes *Annotation*
 -keepattributes SourceFile,LineNumberTable
 -keep class com.google.firebase.crashlytics.** { *; }
 
@@ -33,7 +34,3 @@
 -keep class io.ktor.application.Application
 -keep class kotlin.reflect.jvm.internal.**
 -keep class kotlin.text.RegexOption
-
-# Netty
--keep class io.ktor.server.netty.EngineMain
--keepnames class io.netty.** { *;}

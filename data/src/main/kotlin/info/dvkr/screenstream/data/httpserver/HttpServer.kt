@@ -24,18 +24,18 @@ import io.ktor.response.respondText
 import io.ktor.routing.Routing
 import io.ktor.routing.get
 import io.ktor.routing.route
+import io.ktor.server.cio.CIO
+import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.applicationEngineEnvironment
 import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
-import io.ktor.server.netty.Netty
-import io.ktor.server.netty.NettyApplicationEngine
 import io.ktor.utils.io.ByteWriteChannel
-import kotlinx.atomicfu.atomic
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BroadcastChannel
 import kotlinx.coroutines.flow.*
 import java.io.ByteArrayOutputStream
 import java.net.BindException
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 class HttpServer(
@@ -53,8 +53,19 @@ class HttpServer(
     private val jpegBoundary = ("--$multipartBoundary\r\n").toByteArray()
 
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
-        XLog.e(getLog("onCoroutineException"), throwable)
-        onError(FatalError.CoroutineException)
+        when (throwable) {
+            is BindException -> {
+                XLog.w(getLog("onCoroutineException", throwable.toString()))
+                onError(FixableError.AddressInUseException)
+            }
+
+            else -> {
+                XLog.e(getLog("onCoroutineException"), throwable)
+                onError(FatalError.NettyServerException)
+            }
+        }
+        ktorServer?.stop(250, 250)
+        ktorServer = null
     }
 
     init {
@@ -62,7 +73,7 @@ class HttpServer(
     }
 
     private val lastJPEG: AtomicReference<ByteArray> = AtomicReference(ByteArray(0))
-    private var ktorServer: NettyApplicationEngine? = null
+    private var ktorServer: CIOApplicationEngine? = null
     private var stopDeferred: CompletableDeferred<Unit>? = null
 
     fun start(serverAddresses: List<NetInterface>) {
@@ -96,10 +107,8 @@ class HttpServer(
             }
         }
 
-        ktorServer = embeddedServer(Netty, environment) {
-            connectionGroupSize = 1
-            workerGroupSize = 2
-            callGroupSize = 1
+        ktorServer = embeddedServer(CIO, environment) {
+            connectionIdleTimeoutSeconds = 10
         }
 
         var exception: AppError? = null
@@ -184,8 +193,8 @@ class HttpServer(
                         override suspend fun writeTo(channel: ByteWriteChannel) {
                             this@get.ensureActive()
                             val clientId = hashCode().toLong()
-                            val emmitCounter = atomic(0L)
-                            val collectCounter = atomic(0L)
+                            val emmitCounter = AtomicLong(0L)
+                            val collectCounter = AtomicLong(0L)
                             clientMJPEGFrameBroadcastChannel.asFlow()
                                 .map { Pair(emmitCounter.incrementAndGet(), it) }
                                 .conflate()
@@ -203,7 +212,12 @@ class HttpServer(
                                 }
                                 .safeCollect { (counter, jpeg) ->
                                     if (collectCounter.incrementAndGet() != counter) {
-                                        XLog.i(this@HttpServer.getLog("safeCollect", "Slow connection. Client: $clientId"))
+                                        XLog.i(
+                                            this@HttpServer.getLog(
+                                                "safeCollect",
+                                                "Slow connection. Client: $clientId"
+                                            )
+                                        )
                                         collectCounter.getAndSet(counter)
                                         clientStatistic.sendEvent(StatisticEvent.Backpressure(clientId))
                                     }
